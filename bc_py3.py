@@ -7,6 +7,7 @@ from uuid import uuid4
 from hashlib import sha256
 import time
 import utils
+import sys
 
 class Block:
     def __init__(self, index, transactions, proof_of_verification, timestamp, previous_hash):
@@ -120,7 +121,7 @@ class Blockchain:
 app =  Flask(__name__)
 
 # Initialize a blockchain object.
-PORT = 5062
+PORT = int(sys.argv[1])
 blockchain = Blockchain(PORT)
         
 ##############################################################################################################
