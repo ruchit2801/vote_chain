@@ -61,10 +61,15 @@ class Blockchain:
     
     def add_new_transaction(self, tx_data):
         transaction_id = str(self.PORT) + str(self.sequence_number)
-        self.transactions[transaction_id] = tx_data
         self.sequence_number +=1
-        
-        encrypted = utils.encrypt(tx_data)
+        txn = {
+                "pub_key" : tx_data["pub_key"],
+                "vote" : tx_data["vote"],
+                "timestamp" :tx_data["timestamp"],
+                "sign" : tx_data["sign"]
+            }
+        self.transactions[transaction_id] = txn
+        encrypted = utils.encrypt(txn)
         self.encrypted_transactions[encrypted] = transaction_id
         
         return transaction_id
@@ -152,8 +157,7 @@ def create_chain_from_dump(chain_dump):
 @app.route('/new_transaction', methods=['POST'])
 def new_transaction():
     tx_data = request.get_json()
-    required_fields = ["pub_key", "vote"]
-    
+    required_fields = ["pub_key", "vote"]    
     for field in required_fields:
         if not tx_data.get(field):
             return "Invalid transaction data", 404
@@ -170,16 +174,33 @@ def new_transaction():
     
     
     # If the transaction is present in the local pool, return the transaction id 
-    encrypted = utils.encrypt(tx_data)
+    txn = {
+            "pub_key" : tx_data["pub_key"],
+            "vote" : tx_data["vote"],
+            "timestamp" :tx_data["timestamp"],
+            "sign" : tx_data["sign"]
+        }
+    encrypted = utils.encrypt(txn)
     if(encrypted in blockchain.encrypted_transactions):
         return blockchain.encrypted_transactions[encrypted], 201
     
     
-    # Storing the transaction
-    transaction_id = blockchain.add_new_transaction(tx_data) 
+    if "transaction_id" not in tx_data:
+        transaction_id = blockchain.add_new_transaction(tx_data)
+        tx_data["transaction_id"] = transaction_id
+    else:
+        transaction = {"pub_key" : tx_data["pub_key"], 
+                  "vote": tx_data["vote"], 
+                  "timestamp" : tx_data["timestamp"], 
+                  "sign" : tx_data["sign"]}
+        transaction_id = tx_data["transaction_id"]
+        blockchain.transactions[transaction_id] = transaction
+        blockchain.encrypted_transactions[encrypted] = transaction_id
+        
     
     data = {"transaction_id" :  transaction_id}
     headers = {'Content-Type': "application/json"}
+
     responses = []    
     for peer in blockchain.peers:
         resp = requests.post(peer+'/receive_adv_txn', data=json.dumps(data), headers=headers).json()
@@ -188,8 +209,7 @@ def new_transaction():
     for response in responses:
         if(response["requested"]):
             requests.post(response["peer"] + '/new_transaction', data=json.dumps(tx_data), headers=headers)
-            
-       
+             
     return str(transaction_id), 201
 
 @app.route('/receive_adv_txn', methods=['POST'])
@@ -218,7 +238,7 @@ def propose_block():
             "block_id" : block["index"]}
     
     for peer in blockchain.peers:
-        requests.post(peer + '/receive_adv_block', data=json.dumps(block), headers=headers)
+        requests.post(peer + '/receive_adv_block', data=json.dumps(data), headers=headers)
         
     return json.dumps(block)
 
@@ -235,23 +255,23 @@ def send_requested_block():
         return json.dumps(blockchain.chain[jsn["block_id"]].__dict__)
     else:
         if block_id in blockchain.pending_blocks:
-            return json.dumps(blockchain.pending_blocks[block_id])
+            return json.dumps(blockchain.pending_blocks[block_id].__dict__)
         else:
             return json.dumps({"error" : "No block with given ID found", "code": 404})            
 
 @app.route('/receive_adv_block', methods=['POST'])
 def receive_advertise_block():
     jsn = request.get_json()
-    
     if "block_id" not in jsn or "peer" not in jsn:
         return "Invalid request", 404
     
     block_id = jsn.get('block_id')
     if block_id <= blockchain.last_block.index:
-        return False
+        return json.dumps({"error " : "error"})
 
     if block_id not in blockchain.received_block_advertises:
-        data = {"block_id" : block_id}
+        data = {"block_id" : block_id, 
+                "peer" : "http://localhost:" + str(PORT)}
         headers = {'Content-Type': "application/json"}
         
         requested_block = requests.post(jsn["peer"] + '/request_block', data=json.dumps(data), headers=headers).json()
@@ -262,9 +282,10 @@ def receive_advertise_block():
                 timestamp = requested_block['timestamp'],
                 previous_hash = requested_block['previous_hash']
             )
-        verified = utils.is_valid_block(block)
+        block.hash = requested_block['hash']
+        verified = utils.is_valid_block(block.__dict__)
         if not verified:
-            return False
+            return json.dumps({"error " : "error"})
         
         for transaction in block.transactions:
             if transaction in blockchain.transactions:
@@ -284,8 +305,11 @@ def receive_advertise_block():
         if block_id in blockchain.pending_blocks:
             blockchain.add_block(blockchain.pending_blocks[block_id])
             del blockchain.pending_blocks[block_id]
+            return str(block_id)
         else:
-            return False
+            return json.dumps({"error " : "error"})
+    else:
+        return json.dumps({"error " : "error"})
         
 @app.route('/create_genesis_block', methods=['GET'])
 def create_genesis_block():
@@ -323,7 +347,7 @@ def register_with_existing_node():
     if not node_address:
         return "Invalid data", 400
 
-    data = {"node_address": "http://localhost:" + str(PORT) + "/"}
+    data = {"node_address": "http://localhost:" + str(PORT)}
     headers = {'Content-Type': "application/json"}
 
     # Make a request to register with remote node and obtain information
@@ -333,8 +357,11 @@ def register_with_existing_node():
     if response.status_code == 200:
         global blockchain
         chain_dump = response.json()['chain']
-        blockchain = create_chain_from_dump(chain_dump)
         blockchain.peers.add(node_address)
+        blockchain_new = create_chain_from_dump(chain_dump)
+        if(len(blockchain_new.chain) > len(blockchain.chain)):
+            blockchain_new.peers = blockchain.peers
+            blockchain = blockchain_new
         return "Registration successful", 200
     else:
         # if something goes wrong, pass it on to the API response
@@ -347,7 +374,11 @@ def get_peers():
 # Running the app
 app.run(host='localhost', port=PORT, debug=True)
 
-    
+@app.route('/remove_peers', methods=['POST'])
+def remove_peer():
+    node_address = request.get_json()["node_address"]
+    blockchain.peers.remove(node_address)
+    return "Peer {} removed successfully".format(node_address), 201
 
     
     
