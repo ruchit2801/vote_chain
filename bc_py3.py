@@ -26,7 +26,6 @@ class Blockchain:
 
     def __init__(self, PORT):
         self.chain = []
-        self.create_genesis_block()
         self.transactions = {}
         self.peers = set()
         self.PORT = PORT
@@ -37,9 +36,23 @@ class Blockchain:
         self.received_block_advertises = set()
 
     def create_genesis_block(self):
-        sign = utils.sign_block(0, {}, time.time(), "0")
-        genesis_block = Block(0, {}, sign, time.time(), "0")
+        block = {
+                "index" : 0,
+                "transactions" : {},
+                "timestamp" : time.time(),
+                "previous_hash" : 0
+            }
+        sign = utils.sign_block(block["index"], block["transactions"], block["timestamp"], block["previous_hash"])
+        genesis_block = Block(
+                index = block["index"],
+                transactions = block["transactions"],
+                proof_of_verification = sign,
+                timestamp = block["timestamp"],
+                previous_hash = block["previous_hash"]
+            )
+        genesis_block.hash = genesis_block.compute_hash()
         self.chain.append(genesis_block)
+        return genesis_block.__dict__
 
     @property
     def last_block(self):
@@ -96,22 +109,45 @@ class Blockchain:
                       previous_hash=previous_hash
                       )
         if proof_of_verification:
-            block.hash = block.compute_hash
+            block.hash = block.compute_hash()
             self.add_block(block)
             self.transactions = {}
             return block.__dict__
         else:
             return False
-    
-##############################################################################################################
-####################################### FLASK END POINTS FOR THE NODE ########################################
-##############################################################################################################       
+
 # Initialize flask application
 app =  Flask(__name__)
 
 # Initialize a blockchain object.
-PORT = 5061
-blockchain = Blockchain(PORT)   
+PORT = 5062
+blockchain = Blockchain(PORT)
+        
+##############################################################################################################
+########################################## Other utility functions ###########################################
+##############################################################################################################   
+def create_chain_from_dump(chain_dump):
+    blockchain = Blockchain(PORT)
+    for idx, block_data in enumerate(chain_dump):
+        block = Block(block_data["index"],
+                      block_data["transactions"],
+                      block_data["proof_of_verification"],
+                      block_data["timestamp"],
+                      block_data["previous_hash"],
+                      )
+        block.hash = block_data["hash"]
+        if idx > 0:
+            verified = utils.is_valid_block(block.__dict__)
+            added = blockchain.add_block(block, clone_mode=True)
+            if not added:
+                raise Exception("The chain dump is tampered!!")
+        else:  # the block is a genesis block, no verification needed
+            blockchain.chain.append(block)
+    return blockchain
+               
+##############################################################################################################
+####################################### FLASK END POINTS FOR THE NODE ########################################
+##############################################################################################################          
 @app.route('/new_transaction', methods=['POST'])
 def new_transaction():
     tx_data = request.get_json()
@@ -167,31 +203,23 @@ def receive_advertise_txn():
     
 @app.route('/get_transactions', methods=['GET'])
 def get_transactions():
-    return blockchain.transactions
-
-@app.route('/chain', methods=['GET'])
-def get_chain():
-    chain_data = []
-    for block in blockchain.chain:
-        chain_data.append(block.__dict__)
-    return json.dumps({"length": len(chain_data),
-                       "chain": chain_data})
-
+    return json.dumps(blockchain.transactions)
 
 @app.route('/propose_block', methods=['GET'])
 def propose_block():
     block = blockchain.create_new_block()
+    
     if not block:
         return "No transactions to add, Block not added", 201
     
     headers = {'Content-Type': "application/json"}
     data = {"peer" : "http://localhost:" + str(blockchain.PORT),
-            "block_id" : block.index}
+            "block_id" : block["index"]}
     
     for peer in blockchain.peers:
         requests.post(peer + '/receive_adv_block', data=json.dumps(block), headers=headers)
         
-    return str(block.index), 201
+    return json.dumps(block)
 
    
 @app.route('/request_block', methods=['POST'])
@@ -201,6 +229,7 @@ def send_requested_block():
     if "block_id" not in jsn:
         return json.dumps({"error" : "missing block_id in request", "code": 404})
     
+    block_id = jsn["block_id"]
     if block_id <= blockchain.last_block.index:
         return json.dumps(blockchain.chain[jsn["block_id"]].__dict__)
     else:
@@ -236,9 +265,13 @@ def receive_advertise_block():
         if not verified:
             return False
         
+        for transaction in block.transactions:
+            if transaction in blockchain.transactions:
+                del blockchain.transactions[transaction]
+        
         assert (requested_block["index"] == block_id)
         blockchain.pending_blocks[block_id] = block
-        blockchain.pending_blocks_counts[block_id] = 1
+        blockchain.pending_blocks_counts[block_id] = 1    
         blockchain.received_block_advertises.add(block_id)
         for peer in blockchain.peers:
             requests.post(peer + '/receive_adv_block', data = json.dumps(data), headers=headers)
@@ -253,6 +286,9 @@ def receive_advertise_block():
         else:
             return False
         
+@app.route('/create_genesis_block', methods=['GET'])
+def create_genesis_block():
+    return json.dumps(blockchain.create_genesis_block())
 
 ##############################################################################################################
 #################################### DECENTRALISED NETWROK IMPLEMENTATION ####################################
@@ -286,7 +322,7 @@ def register_with_existing_node():
     if not node_address:
         return "Invalid data", 400
 
-    data = {"node_address": "http://localhost:" + str(blockchain.PORT) + "/"}
+    data = {"node_address": "http://localhost:" + str(PORT) + "/"}
     headers = {'Content-Type': "application/json"}
 
     # Make a request to register with remote node and obtain information
@@ -294,9 +330,10 @@ def register_with_existing_node():
                              data=json.dumps(data), headers=headers)
 
     if response.status_code == 200:
+        global blockchain
         chain_dump = response.json()['chain']
-        blockchain.create_chain_from_dump(chain_dump)
-        blockchain.peers.update(response.json()['peers'])
+        blockchain = create_chain_from_dump(chain_dump)
+        blockchain.peers.add(node_address)
         return "Registration successful", 200
     else:
         # if something goes wrong, pass it on to the API response
@@ -309,26 +346,8 @@ def get_peers():
 # Running the app
 app.run(host='localhost', port=PORT, debug=True)
 
+    
 
-def create_chain_from_dump(chain_dump):
-    blockchain = Blockchain()
-    for idx, block_data in enumerate(chain_dump):
-        block = Block(block_data["index"],
-                      block_data["transactions"],
-                      block_data["proof_of_verification"],
-                      block_data["timestamp"],
-                      block_data["previous_hash"],
-                      )
-        if idx > 0:
-            verified = utils.is_valid_block(block.__dict__)
-            added = blockchain.add_block(block, clone_mode=True)
-            if not added:
-                raise Exception("The chain dump is tampered!!")
-        else:  # the block is a genesis block, no verification needed
-            blockchain.chain.append(block)
-    return blockchain
-    
-    
     
     
     

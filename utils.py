@@ -24,7 +24,7 @@ def sign_transaction(pub_key, vote):
             "vote" : vote
         }
     encoded_txn = json.dumps(transaction, sort_keys=True).encode()
-    return sk_txn.sign(encoded_txn)    
+    return sk_txn.sign(encoded_txn).hex()    
 
 def verify_transaction(transaction):
     txn = {
@@ -32,7 +32,7 @@ def verify_transaction(transaction):
             "vote" : transaction["vote"]
         }
     
-    sign = transaction["sign"]
+    sign = bytes.fromhex(transaction["sign"])
     encoded_txn = json.dumps(txn, sort_keys=True).encode()
     return vk_txn.verify(sign, encoded_txn)
 
@@ -48,14 +48,13 @@ def is_valid_block(block):
             "timestamp" : block["timestamp"],
             "previous_hash" : block["previous_hash"]
         }
-    
-    sign = block["proof_of_verification"]
+    sign = bytes.fromhex(block["proof_of_verification"])
     encoded_block = json.dumps(blk, sort_keys=True).encode()
     return vk_block.verify(sign, encoded_block)
 
 def sign_block(index, transactions, timestamp, previous_hash):
     for transaction in transactions:
-        if not verify_transaction(transaction):
+        if not verify_transaction(transactions[transaction]):
             return False
     
     block = {
@@ -66,7 +65,8 @@ def sign_block(index, transactions, timestamp, previous_hash):
         }
     
     encoded_block = json.dumps(block, sort_keys=True).encode()
-    return sk_block.sign(encoded_block)
+    sign = sk_block.sign(encoded_block).hex()
+    return sign
 
 
     
